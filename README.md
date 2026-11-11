@@ -71,7 +71,8 @@ Each receipt is found with a GitHub search `org:humanitylabs-org is:issue in:bod
 issue is transferred because the body moves with it. If an issue isn't found yet, the result is
 `status_key: "not_found"`, because the search index can lag by up to about a minute after filing.
 Declined items also carry `team_note` when the reviewer wrote a reason: only that text, read from the
-relay bot's own `<!-- feedback-reason -->` comment (comments by people are ignored).
+relay bot's own `<!-- feedback-reason -->` comment, or — when an approved copy is declined later in the Tracker —
+only the `Why:` text of a person's Drop / Not a bug comment. Other comments are never returned.
 
 ### Status keys (`statusFor()` in `worker.js`)
 | Condition (first match wins) | `status_key` | `line` |

@@ -347,4 +347,9 @@ test('cleanReason / reasonFromComments', () => {
   assert.equal(cleanReason('y'.repeat(600)).length, 500);
   assert.equal(reasonFromComments([{ body: 'Declined.\n\n<!-- feedback-reason -->\nNo thanks', user: { type: 'Bot' } }]), 'No thanks');
   assert.equal(reasonFromComments([{ body: 'Declined.' }]), null);
+  // a later Tracker Drop on the approved copy, by a person: only the Why text
+  const drop = { body: 'Dropped (not needed) \u2014 Miguel (@miguel)\n\nWhy: Settings already does this\n\nBuilder: its code is merged behind its switch.', user: { type: 'User' } };
+  assert.equal(reasonFromComments([drop]), 'Settings already does this');
+  assert.equal(reasonFromComments([{ body: 'Not a bug / won\u2019t fix \u2014 Oscar (@o)\n\nWhy: Works as designed', user: { type: 'User' } }]), 'Works as designed');
+  assert.equal(reasonFromComments([{ body: 'random chatter\n\nWhy: secret plans', user: { type: 'User' } }]), null);
 });

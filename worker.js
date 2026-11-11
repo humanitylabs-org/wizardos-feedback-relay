@@ -169,16 +169,22 @@ export function cleanReason(s) {
   return cleanText(s).replace(/<!--|-->/g, '').slice(0, REASON_MAX).trim();
 }
 
-/** The reviewer's reason text from relay comments (bot-written, after the marker), or null. */
+// The Tracker's Drop / Not a bug comment on an approved copy: 'Dropped (not needed) — Name (@login)\n\nWhy: <reason>'.
+const DROP_RE = /^(?:Not a bug \/ won\u2019t fix|Dropped \(not needed\)) \u2014 [^\n]*\n\nWhy: ([\s\S]+?)(?:\n\nBuilder:[\s\S]*)?$/;
+
+/** The reviewer's reason text, or null: the relay's own '<!-- feedback-reason -->' comment, or the 'Why:' line of a
+ *  person's Tracker Drop / Not a bug comment (when an approved copy is declined later). Only the reason, nothing else. */
 export function reasonFromComments(comments) {
   let note = null;
   for (const c of comments || []) {
-    const b = String(c?.body || '');
+    const b = String(c?.body || '').replace(/\r\n?/g, '\n');
+    const bot = !c?.user || c.user.type === 'Bot';
     const at = b.indexOf(REASON_MARKER);
-    if (at < 0) continue;
-    if (c.user && c.user.type !== 'Bot') continue; // only the relay's own comment counts
-    const t = b.slice(at + REASON_MARKER.length).trim();
-    if (t) note = t.slice(0, REASON_MAX);
+    let t = '';
+    if (at >= 0 && bot) t = b.slice(at + REASON_MARKER.length);
+    else if (!bot) { const m = b.trim().match(DROP_RE); if (m) t = m[1]; }
+    t = cleanReason(t);
+    if (t) note = t;
   }
   return note;
 }
