@@ -34,10 +34,13 @@ test('status mapping', () => {
   assert.equal(s('open', ['building']), 'building');
   assert.equal(s('open', ['bug']), 'queued');
   assert.equal(s('open', ['Triage']), 'received', 'labels are case-insensitive');
-  assert.deepEqual(statusFor({ state: 'open', labels: ['needs-review'] }), { status_key: 'waiting_review', line: 'Waiting for a person to review' });
-  assert.equal(statusFor({ state: 'open', labels: [] }).line, 'In line to be built');
-  assert.equal(statusFor({ state: 'closed', state_reason: 'completed', labels: [] }).line, 'Done');
-  assert.equal(statusFor({ state: 'open', labels: ['triage'] }).line, 'Received — sorting it');
+  assert.equal(s('closed', ['rejected', 'bug'], 'completed'), 'not_planned', 'a rejected inbox item is declined');
+  assert.equal(s('open', ['rejected']), 'not_planned');
+  assert.equal(statusFor({ state: 'closed', state_reason: 'not_planned', labels: [] }).line, 'Declined by the team');
+  assert.deepEqual(statusFor({ state: 'open', labels: ['needs-review'] }), { status_key: 'waiting_review', line: 'Waiting for the team to look at it' });
+  assert.equal(statusFor({ state: 'open', labels: [] }).line, 'Coming up — in line to be built');
+  assert.equal(statusFor({ state: 'closed', state_reason: 'completed', labels: [] }).line, 'Done ✓');
+  assert.equal(statusFor({ state: 'open', labels: ['triage'] }).line, 'Got it — the team is sorting it');
 });
 
 // ------------------------------------------------------------- title + text
@@ -210,7 +213,7 @@ test('anonymous report goes to the inbox with needs-review; status hides repo de
   assert.equal(r.headers.get('access-control-allow-origin'), '*');
   const out = await r.json();
   assert.match(out.receipt, /^[0-9a-f]{32}$/);
-  assert.deepEqual({ ...out, receipt: 'x' }, { receipt: 'x', status_key: 'waiting_review', line: 'Waiting for a person to review' });
+  assert.deepEqual({ ...out, receipt: 'x' }, { receipt: 'x', status_key: 'waiting_review', line: 'Waiting for the team to look at it' });
   const [issue] = gh.issues;
   assert.equal(issue.repo, 'wizardos-feedback-inbox');
   assert.deepEqual(issue.labels.map((l) => l.name), ['needs-review', 'bug']);
@@ -223,7 +226,7 @@ test('anonymous report goes to the inbox with needs-review; status hides repo de
   const s = await status(app, [out.receipt, 'f'.repeat(32)]);
   assert.equal(s.status, 200);
   const sj = await s.json();
-  assert.deepEqual(sj.results[out.receipt], { status_key: 'waiting_review', line: 'Waiting for a person to review', title: 'Mail is blank after update.', kind: 'bug', updated: '2026-11-11T00:00:00Z', done_at: null });
+  assert.deepEqual(sj.results[out.receipt], { status_key: 'waiting_review', line: 'Waiting for the team to look at it', title: 'Mail is blank after update.', kind: 'bug', updated: '2026-11-11T00:00:00Z', done_at: null, closed_at: null });
   assert.equal(sj.results['f'.repeat(32)].status_key, 'not_found');
   const raw = JSON.stringify(sj);
   for (const leak of ['wizardos-feedback-inbox', 'needs-review', 'https://', 'bot', 'humanitylabs']) assert.ok(!raw.includes(leak), leak);
@@ -238,6 +241,7 @@ test('anonymous report goes to the inbox with needs-review; status hides repo de
   const done = (await (await status(app3, [out.receipt])).json()).results[out.receipt];
   assert.equal(done.status_key, 'done');
   assert.equal(done.done_at, '2026-11-12T00:00:00Z');
+  assert.equal(done.closed_at, '2026-11-12T00:00:00Z');
 });
 
 test('trusted login and org member go to triage; outsider and bad token go to inbox', async () => {

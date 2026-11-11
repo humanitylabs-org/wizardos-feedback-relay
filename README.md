@@ -55,7 +55,7 @@ Returns the plain-text line `WizardOS Feedback relay: ok`.
   ]
 }
 ```
-`201` → `{"receipt": "<32 hex>", "status_key": "waiting_review", "line": "Waiting for a person to review"}`
+`201` → `{"receipt": "<32 hex>", "status_key": "waiting_review", "line": "Waiting for the team to look at it"}`
 
 - The title comes from the first sentence or line, up to 90 characters.
 - The receipt is 128 random bits written as hex, so it is safe in a URL. It is stored in the issue
@@ -63,8 +63,8 @@ Returns the plain-text line `WizardOS Feedback relay: ok`.
 
 ### `GET /v1/status?receipt=A,B,…` (at most 50)
 ```json
-{"results": {"A": {"status_key": "building", "line": "Being built", "title": "…", "kind": "bug",
-                   "updated": "2026-11-11T…Z", "done_at": null}}}
+{"results": {"A": {"status_key": "building", "line": "Being built now", "title": "…", "kind": "bug",
+                   "updated": "2026-11-11T…Z", "done_at": null, "closed_at": null}}}
 ```
 Each receipt is found with a GitHub search `org:humanitylabs-org is:issue in:body "feedback-receipt: X"`
 (5 receipts per query). The search covers open and closed issues, and the receipt survives when an
@@ -74,14 +74,14 @@ issue is transferred because the body moves with it. If an issue isn't found yet
 ### Status keys (`statusFor()` in `worker.js`)
 | Condition (first match wins) | `status_key` | `line` |
 |---|---|---|
-| closed as not planned / duplicate | `not_planned` | Not planned |
-| closed (completed) | `done` | Done |
-| open + `needs-review` | `waiting_review` | Waiting for a person to review |
-| open + `ready-to-test` | `ready` | Ready for the team to try |
-| open + `ai-review` | `checking` | Being checked |
-| open + `building` | `building` | Being built |
-| open + `triage` | `received` | Received — sorting it |
-| any other open | `queued` | In line to be built |
+| closed as not planned / duplicate, or labelled `rejected` | `not_planned` | Declined by the team |
+| closed (completed) | `done` | Done ✓ |
+| open + `needs-review` | `waiting_review` | Waiting for the team to look at it |
+| open + `ready-to-test` | `ready` | Almost there — the team is trying it out |
+| open + `ai-review` | `checking` | Being tested |
+| open + `building` | `building` | Being built now |
+| open + `triage` | `received` | Got it — the team is sorting it |
+| any other open | `queued` | Coming up — in line to be built |
 
 ### Reviewer endpoints: `GET /v1/pending`, `POST /v1/review`
 For WizardOS team members (the Tracker calls these server-side with the signed-in user's own GitHub
@@ -173,8 +173,8 @@ A reviewer must be an org member with access to `wizardos-feedback-inbox`. For e
 - **Accept:** check the text and screenshots, and edit out anything sensitive. Then use
   *Transfer issue* to move it to `humanitylabs-org/wizard-os`, add the `triage` label, and
   remove `needs-review`. Labels with the same name carry over on transfer, so check them after
-  the move. The reporter now sees *Received — sorting it*, and the normal pipeline takes over.
-- **Reject:** *Close as not planned*. The reporter sees *Not planned*.
+  the move. The reporter now sees *Got it — the team is sorting it*, and the normal pipeline takes over.
+- **Reject:** *Close as not planned*. The reporter sees *Declined by the team* with the day and time.
 - **Never delete the issue or remove the `<!-- feedback-receipt: … -->` line.** Status lookup
   depends on it, and it stays on the issue through transfers and closing.
 

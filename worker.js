@@ -29,16 +29,17 @@ const REVIEW_LABELS = {
 
 // ---------------------------------------------------------------- status mapping
 
+// Plain words for non-technical people. The status_key values are the stable contract; the lines may change.
 export const STATUS_LINES = {
-  waiting_review: 'Waiting for a person to review',
-  not_planned: 'Not planned',
-  done: 'Done',
-  received: 'Received — sorting it',
-  ready: 'Ready for the team to try',
-  checking: 'Being checked',
-  building: 'Being built',
-  queued: 'In line to be built',
-  not_found: 'Not found yet — new reports can take a minute to show up',
+  waiting_review: 'Waiting for the team to look at it',
+  not_planned: 'Declined by the team',
+  done: 'Done ✓',
+  received: 'Got it — the team is sorting it',
+  ready: 'Almost there — the team is trying it out',
+  checking: 'Being tested',
+  building: 'Being built now',
+  queued: 'Coming up — in line to be built',
+  not_found: 'Got it — it can take a minute to show up here',
 };
 
 /** Pure: GitHub issue {state, state_reason, labels} -> {status_key, line}. */
@@ -46,8 +47,9 @@ export function statusFor(issue) {
   const labels = new Set((issue.labels || []).map((l) => String(typeof l === 'string' ? l : l.name).toLowerCase()));
   let key;
   if (issue.state === 'closed') {
-    key = issue.state_reason === 'not_planned' || issue.state_reason === 'duplicate' ? 'not_planned' : 'done';
-  } else if (labels.has('needs-review')) key = 'waiting_review';
+    key = issue.state_reason === 'not_planned' || issue.state_reason === 'duplicate' || labels.has('rejected') ? 'not_planned' : 'done';
+  } else if (labels.has('rejected')) key = 'not_planned';
+  else if (labels.has('needs-review')) key = 'waiting_review';
   else if (labels.has('ready-to-test')) key = 'ready';
   else if (labels.has('ai-review')) key = 'checking';
   else if (labels.has('building')) key = 'building';
@@ -477,13 +479,15 @@ export function createApp({ fetchImpl = (...a) => fetch(...a), now = () => Date.
         for (const rc of batch) {
           const it = found[rc];
           let value;
-          if (!it) value = { status_key: 'not_found', line: STATUS_LINES.not_found, title: null, kind: null, updated: null, done_at: null };
+          if (!it) value = { status_key: 'not_found', line: STATUS_LINES.not_found, title: null, kind: null, updated: null, done_at: null, closed_at: null };
           else {
             let st = statusFor(it);
             // Approved in the inbox but its wizard-os twin is not searchable yet: it's been received.
             if (isInboxIssue(cfg, it) && it.state === 'closed' && labelNames(it).includes('approved')) st = { status_key: 'received', line: STATUS_LINES.received };
             const kind = kindOf(it);
-            value = { ...st, title: String(it.title || ''), kind, updated: it.updated_at || null, done_at: st.status_key === 'done' || st.status_key === 'not_planned' ? it.closed_at || null : null };
+            const closed = st.status_key === 'done' || st.status_key === 'not_planned';
+            // closed_at: when it was finished or declined (local time is the app's job); done_at kept for old clients.
+            value = { ...st, title: String(it.title || ''), kind, updated: it.updated_at || null, done_at: closed ? it.closed_at || null : null, closed_at: closed ? it.closed_at || null : null };
           }
           if (value.status_key !== 'not_found') statusCache.set(rc, { at: now(), value });
           results[rc] = value;
@@ -614,7 +618,7 @@ export function createApp({ fetchImpl = (...a) => fetch(...a), now = () => Date.
     }
 
     if (action === 'reject') {
-      await finishInbox(cfg, token, number, { reason: 'not_planned', add: 'rejected', comment: `Not planned — rejected by @${login}.` });
+      await finishInbox(cfg, token, number, { reason: 'not_planned', add: 'rejected', comment: `Declined by @${login}.` });
       statusCache.delete(receipt);
       return json({ ok: true, already: false, result: 'rejected', issue: number });
     }

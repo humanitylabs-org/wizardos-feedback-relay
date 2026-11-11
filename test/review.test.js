@@ -254,8 +254,12 @@ test('status prefers the wizard-os twin; approved inbox without a twin reads as 
   assert.equal(s.kind, 'bug');
   // rejected inbox item stays not_planned
   const r2 = seedInbox(gh);
-  r2.it.state = 'closed'; r2.it.state_reason = 'not_planned'; r2.it.labels = [{ name: 'rejected' }];
-  assert.equal((await st(r2.receipt)).status_key, 'not_planned');
+  r2.it.state = 'closed'; r2.it.state_reason = 'not_planned'; r2.it.labels = [{ name: 'rejected' }]; r2.it.closed_at = '2026-11-11T02:52:00Z';
+  const rej = await st(r2.receipt);
+  assert.equal(rej.status_key, 'not_planned');
+  assert.equal(rej.line, 'Declined by the team');
+  assert.equal(rej.closed_at, '2026-11-11T02:52:00Z', 'declined items carry when');
+  assert.equal(rej.done_at, '2026-11-11T02:52:00Z', 'done_at kept for older apps');
 });
 
 test('review HTTP surface: methods, CORS header allows Authorization, bad JSON', async () => {
