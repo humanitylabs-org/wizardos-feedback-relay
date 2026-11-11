@@ -1,0 +1,50 @@
+<!doctype html>
+<!-- Opens GitHub's "create GitHub App from manifest" page for humanitylabs-org.
+     Must be opened by an org owner who is signed in to GitHub. The manifest below
+     must stay identical to github-app-manifest.json (a test checks this). -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Create the WizardOS Feedback GitHub App</title>
+<style>body{font:16px/1.5 system-ui,sans-serif;max-width:32rem;margin:3rem auto;padding:0 1rem}button{font:inherit;padding:.6rem 1.2rem}</style>
+</head>
+<body>
+<h1>WizardOS Feedback</h1>
+<p>Sending you to GitHub to create the <b>WizardOS Feedback</b> app for humanitylabs-org…</p>
+<form id="f" method="post">
+  <input type="hidden" name="manifest" id="manifest">
+  <noscript><p>JavaScript is needed to build the request.</p></noscript>
+  <button type="submit">Continue to GitHub</button>
+</form>
+<script id="manifest-json" type="application/json">
+{
+  "name": "WizardOS Feedback",
+  "url": "https://github.com/humanitylabs-org",
+  "description": "Files WizardOS Feedback reports (bugs and feature requests) from the Feedback app relay into humanitylabs-org.",
+  "public": false,
+  "hook_attributes": {
+    "url": "https://example.com",
+    "active": false
+  },
+  "redirect_url": "https://github.com/humanitylabs-org",
+  "default_permissions": {
+    "issues": "write",
+    "contents": "write",
+    "members": "read",
+    "metadata": "read"
+  },
+  "default_events": []
+}
+</script>
+<script>
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  const state = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  const form = document.getElementById('f');
+  form.action = 'https://github.com/organizations/humanitylabs-org/settings/apps/new?state=' + state;
+  document.getElementById('manifest').value = JSON.stringify(JSON.parse(document.getElementById('manifest-json').textContent));
+  form.submit();
+</script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+{
+  "name": "wizardos-feedback-relay",
+  "private": true,
+  "type": "module",
+  "description": "Public relay that files WizardOS Feedback reports into humanitylabs-org via the WizardOS Feedback GitHub App",
+  "scripts": {
+    "test": "node --test"
+  }
+}
