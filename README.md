@@ -2,7 +2,7 @@
 
 A small public Cloudflare Worker that lets the WizardOS **Feedback** app file bug reports and
 feature requests into the private `humanitylabs-org` repos — even for people who are signed out
-or not in the org. It holds the identity of a private GitHub App, **WizardOS Feedback**.
+or not in the org. It holds the identity of a private GitHub App, **WizardOS Feedback Relay**.
 
 - One ES-module file, `worker.js`. No npm dependencies, no build step, well under 1 MiB.
 - Reporters get a random **receipt**. They use it to check progress in plain words. The relay
@@ -92,7 +92,7 @@ issue is transferred because the body moves with it. If an issue isn't found yet
 
 | Name | Kind | Value |
 |---|---|---|
-| `GH_APP_ID` | secret | numeric App ID of *WizardOS Feedback* |
+| `GH_APP_ID` | secret | numeric App ID of *WizardOS Feedback Relay* |
 | `GH_APP_PRIVATE_KEY` | secret | App private key PEM: PKCS#1 (`BEGIN RSA PRIVATE KEY`, as GitHub issues it) or PKCS#8. A literal `\n` is accepted. |
 | `GH_ORG` | var | `humanitylabs-org` |
 | `INBOX_REPO` | var | `wizardos-feedback-inbox` |

@@ -1,7 +1,7 @@
 // WizardOS Feedback relay — Cloudflare Worker (ES module, no dependencies, no build).
 //
 // Takes bug/feature reports from the Feedback app (signed in or not) and files them
-// as GitHub issues in humanitylabs-org using the "WizardOS Feedback" GitHub App.
+// as GitHub issues in humanitylabs-org using the "WizardOS Feedback Relay" GitHub App.
 // Trusted reporters go straight to TRIAGE_REPO; everyone else lands in INBOX_REPO
 // for a person to review. Reporters get a random receipt they can poll for a
 // plain-words status; no repo names, labels, URLs, logins or comments are returned.

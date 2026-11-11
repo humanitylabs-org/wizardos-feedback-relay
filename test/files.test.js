@@ -11,7 +11,7 @@ test('manifest.html embeds exactly github-app-manifest.json and posts to the org
   const html = readFileSync(join(root, 'manifest.html'), 'utf8');
   const embedded = JSON.parse(html.match(/<script id="manifest-json" type="application\/json">([\s\S]*?)<\/script>/)[1]);
   assert.deepEqual(embedded, m);
-  assert.equal(m.name, 'WizardOS Feedback');
+  assert.equal(m.name, 'WizardOS Feedback Relay');
   assert.equal(m.public, false);
   assert.deepEqual(m.default_permissions, { issues: 'write', contents: 'write', members: 'read', metadata: 'read' });
   assert.ok(html.includes("https://github.com/organizations/humanitylabs-org/settings/apps/new?state="));

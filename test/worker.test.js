@@ -151,7 +151,8 @@ test('JWT signs with PKCS#1 and PKCS#8 keys and verifies', async () => {
     assert.deepEqual(JSON.parse(Buffer.from(h, 'base64url')), { alg: 'RS256', typ: 'JWT' });
     assert.deepEqual(JSON.parse(Buffer.from(p, 'base64url')), { iat: 1_800_000_000 - 60, exp: 1_800_000_000 + 540, iss: '12345' });
     assert.ok(verifyJwt(jwt, pub), 'signature verifies');
-    assert.ok(!verifyJwt(jwt.replace(/.$/, (c) => (c === 'A' ? 'B' : 'A')), pub), 'tampered fails');
+    const i = jwt.lastIndexOf('.') + 10; // a middle signature char (the last one only carries padding bits)
+    assert.ok(!verifyJwt(jwt.slice(0, i) + (jwt[i] === 'A' ? 'B' : 'A') + jwt.slice(i + 1), pub), 'tampered fails');
   }
 });
 
