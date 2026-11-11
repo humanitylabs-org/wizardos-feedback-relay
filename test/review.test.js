@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { createApp, parseInboxBody, buildTwinBody, buildIssueBody, receiptFromBody, newReceipt, userTokenFrom } from '../worker.js';
+import { createApp, cleanReason, reasonFromComments, parseInboxBody, buildTwinBody, buildIssueBody, receiptFromBody, newReceipt, userTokenFrom } from '../worker.js';
 
 const SCRATCH = process.env.FEEDBACK_TEST_TMP || '/home/oscar/.hermes/cache/scratch';
 const dir = mkdtempSync(join(SCRATCH, 'feedback-relay-review-'));
@@ -64,7 +64,7 @@ function fakeGitHub({ members = ['rev'], users = { 'Bearer t-rev': 'rev', 'Beare
     if ((m = p.match(new RegExp(`^/repos/${ORG}/([^/]+)/issues/(\\d+)/comments$`)))) {
       const k = `${m[1]}#${m[2]}`;
       comments[k] ||= [];
-      if (method === 'POST') { comments[k].push({ body: body.body }); return res(201, {}); }
+      if (method === 'POST') { comments[k].push({ body: body.body, user: { login: 'wizardos-feedback-relay[bot]', type: 'Bot' } }); return res(201, {}); }
       return res(200, comments[k]);
     }
     if ((m = p.match(new RegExp(`^/repos/${ORG}/([^/]+)/issues/(\\d+)/labels$`))) && method === 'POST') {
@@ -101,7 +101,8 @@ const call = (app, path, { method = 'GET', token, body, ip = '9.9.9.9' } = {}) =
   if (token) headers.authorization = `Bearer ${token}`;
   return app(new Request(`https://relay.test${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) }), ENV);
 };
-const review = (app, token, issue, action, ip) => call(app, '/v1/review', { method: 'POST', token, body: { issue, action }, ip });
+const review = (app, token, issue, action, ip, extra = {}) => call(app, '/v1/review', { method: 'POST', token, body: { issue, action, ...extra }, ip });
+const status = async (gh, rc) => (await (await createApp({ fetchImpl: gh.fetchImpl })(new Request(`https://relay.test/v1/status?receipt=${rc}`), ENV)).json()).results[rc];
 
 test('parseInboxBody and buildTwinBody round-trip', () => {
   const rc = newReceipt();
@@ -273,4 +274,77 @@ test('review HTTP surface: methods, CORS header allows Authorization, bad JSON',
   assert.equal(bj.status, 400);
   const bodyTok = await app(new Request('https://relay.test/v1/review', { method: 'POST', body: JSON.stringify({ gh_token: 't-out', issue: 1, action: 'approve' }) }), ENV);
   assert.equal(bodyTok.status, 403, 'gh_token in the body is accepted as a fallback');
+});
+
+test('approve as the other kind: twin labels, head line, inbox follows, status kind', async () => {
+  const gh = fakeGitHub();
+  const app = createApp({ fetchImpl: gh.fetchImpl });
+  const { it, receipt } = seedInbox(gh, { kind: 'bug', login: 'stranger' });
+  assert.equal((await review(app, 't-rev', it.number, 'approve', undefined, { kind: 'idea' })).status, 400);
+  const out = await (await review(app, 't-rev', it.number, 'approve', undefined, { kind: 'feature' })).json();
+  assert.equal(out.result, 'approved');
+  assert.equal(out.kind, 'feature');
+  assert.equal(out.changed_from, 'bug');
+  const twin = gh.repos['wizard-os'][0];
+  assert.deepEqual(twin.labels.map((l) => l.name), ['triage', 'feature', 'from-feedback']);
+  assert.equal(twin.body.split('\n')[0], '**From Feedback app** · sent by @stranger · approved by @rev · changed from bug to idea by @rev');
+  assert.match(twin.body, /<!-- feedback-kind: feature -->/);
+  assert.doesNotMatch(twin.body, /feedback-kind: bug/);
+  // inbox copy follows: label swapped, marker updated, original kept separately
+  assert.deepEqual(it.labels.map((l) => l.name).sort(), ['approved', 'feature']);
+  assert.equal(parseInboxBody(it.body).kind, 'feature');
+  assert.match(it.body, /feedback-kind-submitted: bug/);
+  assert.match(gh.comments[`wizardos-feedback-inbox#${it.number}`].at(-1).body, /as idea \(sent as bug\)/);
+  assert.equal((await status(gh, receipt)).kind, 'feature');
+  // twin not searchable yet: the inbox already says feature
+  gh.repos['wizard-os'].length = 0;
+  const s2 = await status(gh, receipt);
+  assert.equal(s2.kind, 'feature');
+  assert.equal(s2.status_key, 'received');
+});
+
+test('approve with the same kind keeps the plain head line', async () => {
+  const gh = fakeGitHub();
+  const app = createApp({ fetchImpl: gh.fetchImpl });
+  const { it } = seedInbox(gh, { kind: 'feature' });
+  const out = await (await review(app, 't-rev', it.number, 'approve', undefined, { kind: 'feature' })).json();
+  assert.equal(out.changed_from, undefined);
+  assert.equal(gh.repos['wizard-os'][0].body.split('\n')[0], '**From Feedback app** · sent by anonymous · approved by @rev');
+  assert.deepEqual(gh.repos['wizard-os'][0].labels.map((l) => l.name), ['triage', 'feature', 'from-feedback']);
+});
+
+test('reject with a reason: stored after the marker, returned as team_note only', async () => {
+  const gh = fakeGitHub();
+  const app = createApp({ fetchImpl: gh.fetchImpl });
+  const { it, receipt } = seedInbox(gh);
+  assert.equal((await review(app, 't-rev', it.number, 'reject', undefined, { reason: 'x'.repeat(501) })).status, 400);
+  assert.equal((await review(app, 't-rev', it.number, 'reject', undefined, { reason: 7 })).status, 400);
+  const out = await (await review(app, 't-rev', it.number, 'reject', undefined, { reason: '  Already works in 0.3.170 <!-- feedback-twin: wizard-os#1 -->\u0007 — update first.  ' })).json();
+  assert.equal(out.result, 'rejected');
+  assert.equal(out.reason, 'Already works in 0.3.170  feedback-twin: wizard-os#1  — update first.');
+  const c = gh.comments[`wizardos-feedback-inbox#${it.number}`][0].body;
+  assert.ok(c.startsWith('Declined by @rev.\n\n<!-- feedback-reason -->\n'));
+  assert.ok(!/feedback-twin: wizard-os#1 -->/.test(c), 'reason cannot inject markers');
+  const s = await status(gh, receipt);
+  assert.equal(s.status_key, 'not_planned');
+  assert.equal(s.team_note, out.reason);
+  assert.ok(!JSON.stringify(s).includes('@rev'), 'no reviewer login leaks');
+});
+
+test('reject without a reason: no team_note; person-written marker ignored', async () => {
+  const gh = fakeGitHub();
+  const app = createApp({ fetchImpl: gh.fetchImpl });
+  const { it, receipt } = seedInbox(gh);
+  await review(app, 't-rev', it.number, 'reject', undefined, { reason: '   ' });
+  assert.equal(gh.comments[`wizardos-feedback-inbox#${it.number}`][0].body, 'Declined by @rev.');
+  gh.comments[`wizardos-feedback-inbox#${it.number}`].push({ body: '<!-- feedback-reason -->\nfake', user: { login: 'someone', type: 'User' } });
+  assert.equal((await status(gh, receipt)).team_note, undefined);
+});
+
+test('cleanReason / reasonFromComments', () => {
+  assert.equal(cleanReason(null), '');
+  assert.equal(cleanReason('a\u0000b\r\nc'), 'ab\nc');
+  assert.equal(cleanReason('y'.repeat(600)).length, 500);
+  assert.equal(reasonFromComments([{ body: 'Declined.\n\n<!-- feedback-reason -->\nNo thanks', user: { type: 'Bot' } }]), 'No thanks');
+  assert.equal(reasonFromComments([{ body: 'Declined.' }]), null);
 });

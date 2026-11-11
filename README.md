@@ -70,6 +70,8 @@ Each receipt is found with a GitHub search `org:humanitylabs-org is:issue in:bod
 (5 receipts per query). The search covers open and closed issues, and the receipt survives when an
 issue is transferred because the body moves with it. If an issue isn't found yet, the result is
 `status_key: "not_found"`, because the search index can lag by up to about a minute after filing.
+Declined items also carry `team_note` when the reviewer wrote a reason: only that text, read from the
+relay bot's own `<!-- feedback-reason -->` comment (comments by people are ignored).
 
 ### Status keys (`statusFor()` in `worker.js`)
 | Condition (first match wins) | `status_key` | `line` |
@@ -95,14 +97,20 @@ open inbox issues with `needs-review`, oldest first. `text` is the report withou
 screenshot section; `submitter` is `anonymous` or `@login`; screenshot URLs point into the private
 `wizard-issue-media` repo (fetch them with a token that can read it).
 
-`POST /v1/review {"issue": <inbox number>, "action": "approve"|"reject"}`
+`POST /v1/review {"issue": <inbox number>, "action": "approve"|"reject", "kind"?: "bug"|"feature", "reason"?: "…"}`
 - **approve**: creates an issue in `TRIAGE_REPO` with labels `triage`, `bug`/`feature`, `from-feedback`
   (created if missing), the same title, and a body that starts with
   `**From Feedback app** · sent by <anonymous|@login> · approved by @reviewer`, then the original text,
   screenshots and the **same** receipt marker. Then it comments on the inbox issue with the link
   (plus a hidden `<!-- feedback-twin: repo#N -->`), adds `approved`, removes `needs-review` and closes it
-  as completed. → `{"ok": true, "already": false, "result": "approved", "issue": N, "twin": {"repo", "number", "url"}}`
-- **reject**: adds `rejected`, removes `needs-review`, closes it as not planned. → `{"ok": true, "already": false, "result": "rejected", "issue": N}`
+  as completed. → `{"ok": true, "already": false, "result": "approved", "issue": N, "kind", "twin": {"repo", "number", "url"}}`
+- **approve with `kind`**: approves it as that kind. When it differs from what was sent, the twin gets the new
+  kind's label and marker, the head line gains ` · changed from bug to idea by @reviewer`, the inbox item's
+  label/marker follow (original kept as `<!-- feedback-kind-submitted: … -->`), and the reply carries
+  `"changed_from"`. `/v1/status` then reports the new `kind`.
+- **reject**: adds `rejected`, removes `needs-review`, closes it as not planned. Optional `reason` (≤ 500
+  chars, control characters and comment markers stripped) is stored in the closing comment after
+  `<!-- feedback-reason -->`. → `{"ok": true, "already": false, "result": "rejected", "issue": N, "reason"?}`
 - Idempotent: an item that was already handled returns its existing result with `"already": true`
   (and the twin for approved items); a retried approve after a partial failure reuses the twin.
 

@@ -141,8 +141,10 @@ export function parseInboxBody(body) {
 }
 
 /** Body for the wizard-os twin of an approved inbox issue. Keeps the SAME receipt marker. */
-export function buildTwinBody({ parsed, receipt, kind, reviewer, inboxNumber }) {
-  const parts = [`**From Feedback app** · sent by ${parsed.submitter} · approved by @${reviewer}`, '', parsed.text];
+export function buildTwinBody({ parsed, receipt, kind, reviewer, inboxNumber, fromKind = null }) {
+  let head = `**From Feedback app** · sent by ${parsed.submitter} · approved by @${reviewer}`;
+  if (fromKind && kind && fromKind !== kind) head += ` · changed from ${KIND_WORD[fromKind]} to ${KIND_WORD[kind]} by @${reviewer}`;
+  const parts = [head, '', parsed.text];
   if (parsed.screenshots.length || parsed.failedNote) {
     parts.push('', '**Screenshots**', '');
     parsed.screenshots.forEach((u, i) => parts.push(`![Screenshot ${i + 1}](${u})`));
@@ -155,6 +157,30 @@ export function buildTwinBody({ parsed, receipt, kind, reviewer, inboxNumber }) 
   if (kind) parts.push(`<!-- feedback-kind: ${kind} -->`);
   parts.push(`<!-- feedback-inbox: ${inboxNumber} -->`);
   return parts.join('\n');
+}
+
+const KIND_WORD = { bug: 'bug', feature: 'idea' };
+export const REASON_MAX = 500;
+export const REASON_MARKER = '<!-- feedback-reason -->';
+
+/** Reviewer's decline reason: control chars stripped, no hidden markers, ≤ 500 chars. */
+export function cleanReason(s) {
+  if (typeof s !== 'string') return '';
+  return cleanText(s).replace(/<!--|-->/g, '').slice(0, REASON_MAX).trim();
+}
+
+/** The reviewer's reason text from relay comments (bot-written, after the marker), or null. */
+export function reasonFromComments(comments) {
+  let note = null;
+  for (const c of comments || []) {
+    const b = String(c?.body || '');
+    const at = b.indexOf(REASON_MARKER);
+    if (at < 0) continue;
+    if (c.user && c.user.type !== 'Bot') continue; // only the relay's own comment counts
+    const t = b.slice(at + REASON_MARKER.length).trim();
+    if (t) note = t.slice(0, REASON_MAX);
+  }
+  return note;
 }
 
 function kindOf(issue) {
@@ -488,6 +514,12 @@ export function createApp({ fetchImpl = (...a) => fetch(...a), now = () => Date.
             const closed = st.status_key === 'done' || st.status_key === 'not_planned';
             // closed_at: when it was finished or declined (local time is the app's job); done_at kept for old clients.
             value = { ...st, title: String(it.title || ''), kind, updated: it.updated_at || null, done_at: closed ? it.closed_at || null : null, closed_at: closed ? it.closed_at || null : null };
+            if (st.status_key === 'not_planned') {
+              const repo = isInboxIssue(cfg, it) ? cfg.inbox : cfg.triage;
+              const cm = await gh(`/repos/${cfg.org}/${repo}/issues/${it.number}/comments?per_page=100`, { token });
+              const note = cm.status === 200 && Array.isArray(cm.data) ? reasonFromComments(cm.data) : null;
+              if (note) value.team_note = note;
+            }
           }
           if (value.status_key !== 'not_found') statusCache.set(rc, { at: now(), value });
           results[rc] = value;
@@ -598,6 +630,9 @@ export function createApp({ fetchImpl = (...a) => fetch(...a), now = () => Date.
     if (action !== 'approve' && action !== 'reject') throw clientError(400, 'bad_action', "action must be 'approve' or 'reject'");
     const number = Number(input.issue);
     if (!Number.isInteger(number) || number < 1) throw clientError(400, 'bad_issue', 'issue must be an inbox issue number');
+    if (input.kind !== undefined && input.kind !== null && input.kind !== 'bug' && input.kind !== 'feature') throw clientError(400, 'bad_kind', "kind must be 'bug' or 'feature'");
+    if (input.reason !== undefined && input.reason !== null && typeof input.reason !== 'string') throw clientError(400, 'bad_reason', 'reason must be text');
+    if (typeof input.reason === 'string' && cleanText(input.reason).length > REASON_MAX) throw clientError(400, 'bad_reason', `reason must be at most ${REASON_MAX} characters`);
     const token = await installationToken(cfg);
     const login = await reviewer(cfg, userToken, token);
     const g = await gh(`/repos/${cfg.org}/${cfg.inbox}/issues/${number}`, { token });
@@ -605,7 +640,8 @@ export function createApp({ fetchImpl = (...a) => fetch(...a), now = () => Date.
     const it = g.data;
     const labels = labelNames(it);
     const receipt = receiptFromBody(it.body);
-    const kind = parseInboxBody(it.body).kind || kindOf(it);
+    const submittedKind = parseInboxBody(it.body).kind || kindOf(it);
+    const kind = action === 'approve' && input.kind ? input.kind : submittedKind;
 
     // Already handled? Return what happened (idempotent).
     const twinUrl = (t) => `https://github.com/${cfg.org}/${t.repo}/issues/${t.number}`;
@@ -618,9 +654,11 @@ export function createApp({ fetchImpl = (...a) => fetch(...a), now = () => Date.
     }
 
     if (action === 'reject') {
-      await finishInbox(cfg, token, number, { reason: 'not_planned', add: 'rejected', comment: `Declined by @${login}.` });
+      const why = cleanReason(input.reason);
+      const comment = `Declined by @${login}.` + (why ? `\n\n${REASON_MARKER}\n${why}` : '');
+      await finishInbox(cfg, token, number, { reason: 'not_planned', add: 'rejected', comment });
       statusCache.delete(receipt);
-      return json({ ok: true, already: false, result: 'rejected', issue: number });
+      return json({ ok: true, already: false, result: 'rejected', issue: number, ...(why ? { reason: why } : {}) });
     }
 
     // approve: create (or find) the twin, then close the inbox item.
@@ -628,7 +666,7 @@ export function createApp({ fetchImpl = (...a) => fetch(...a), now = () => Date.
     if (!twin) {
       await ensureLabel(cfg, token, cfg.triage, FROM_FEEDBACK_LABEL);
       const parsed = parseInboxBody(it.body);
-      const body = buildTwinBody({ parsed, receipt, kind, reviewer: login, inboxNumber: number });
+      const body = buildTwinBody({ parsed, receipt, kind, reviewer: login, inboxNumber: number, fromKind: submittedKind });
       const tl = ['triage', FROM_FEEDBACK_LABEL.name];
       if (kind) tl.splice(1, 0, kind);
       const c = await gh(`/repos/${cfg.org}/${cfg.triage}/issues`, { method: 'POST', token, body: { title: String(it.title || 'Feedback'), body, labels: tl } });
@@ -636,9 +674,17 @@ export function createApp({ fetchImpl = (...a) => fetch(...a), now = () => Date.
       twin = { repo: cfg.triage, number: c.data.number };
     }
     const link = `${cfg.org}/${twin.repo}#${twin.number}`;
-    await finishInbox(cfg, token, number, { reason: 'completed', add: 'approved', comment: `Approved by @${login} — sent to ${link}.\n\n<!-- feedback-twin: ${twin.repo}#${twin.number} -->` });
+    const changed = Boolean(submittedKind && kind && submittedKind !== kind);
+    if (changed) {
+      // The inbox copy follows the approved kind too (label + marker), so status reads the new kind even before the twin is searchable.
+      const nb = String(it.body || '').replace(/<!-- feedback-kind: (bug|feature) -->/, `<!-- feedback-kind: ${kind} -->\n<!-- feedback-kind-submitted: ${submittedKind} -->`);
+      await gh(`/repos/${cfg.org}/${cfg.inbox}/issues/${number}`, { method: 'PATCH', token, body: { body: nb } });
+      await gh(`/repos/${cfg.org}/${cfg.inbox}/issues/${number}/labels/${submittedKind}`, { method: 'DELETE', token });
+      await gh(`/repos/${cfg.org}/${cfg.inbox}/issues/${number}/labels`, { method: 'POST', token, body: { labels: [kind] } });
+    }
+    await finishInbox(cfg, token, number, { reason: 'completed', add: 'approved', comment: `Approved by @${login}${changed ? ` as ${KIND_WORD[kind]} (sent as ${KIND_WORD[submittedKind]})` : ''} — sent to ${link}.\n\n<!-- feedback-twin: ${twin.repo}#${twin.number} -->` });
     statusCache.delete(receipt);
-    return json({ ok: true, already: false, result: 'approved', issue: number, twin: { repo: twin.repo, number: twin.number, url: twinUrl(twin) } });
+    return json({ ok: true, already: false, result: 'approved', issue: number, kind, ...(changed ? { changed_from: submittedKind } : {}), twin: { repo: twin.repo, number: twin.number, url: twinUrl(twin) } });
   }
 
   return async function fetchHandler(request, env = {}) {
