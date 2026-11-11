@@ -24,6 +24,12 @@ so the WizardOS Builder account and its teams must not get access to `wizardos-f
 Only a person moves a report from the inbox into `wizard-os`. (Team membership was not changed by
 this setup. Check it whenever Builder access changes.)
 
+> ⚠️ As of setup, `wizardosbuilder` is an org member and the org's base permission is `read`,
+> which gives it **read access to the inbox** (it has no direct or team grant). The Builder must
+> be configured so it never reads `wizardos-feedback-inbox`. For a hard guarantee, an org owner
+> would have to lower the org base permission to `none` and grant access through teams, which
+> affects every repo. That change was intentionally not made here.
+
 Screenshots are saved to `GH_ORG/wizard-issue-media` at
 `feedback/<yyyy>/<receipt>-<n>.<ext>` through the contents API and linked in the issue. If an
 upload fails, the text is still filed with a note saying the screenshot could not be attached.
