@@ -83,8 +83,34 @@ issue is transferred because the body moves with it. If an issue isn't found yet
 | open + `triage` | `received` | Received — sorting it |
 | any other open | `queued` | In line to be built |
 
+### Reviewer endpoints: `GET /v1/pending`, `POST /v1/review`
+For WizardOS team members (the Tracker calls these server-side with the signed-in user's own GitHub
+token). Send the token as `Authorization: Bearer <user token>` (a `gh_token` query/body field is
+accepted as a fallback). The relay checks it with `GET /user`, then checks with the bot that the login
+is an active member of `GH_ORG` (`204`). No token or a dead token → `401 unauthorized`; not a member
+→ `403 forbidden`. `TRUSTED_LOGINS` alone is not enough here.
+
+`GET /v1/pending` → `{"items": [{"number", "kind", "title", "text", "submitter", "created", "screenshots": [urls]}]}`:
+open inbox issues with `needs-review`, oldest first. `text` is the report without the footer, receipt or
+screenshot section; `submitter` is `anonymous` or `@login`; screenshot URLs point into the private
+`wizard-issue-media` repo (fetch them with a token that can read it).
+
+`POST /v1/review {"issue": <inbox number>, "action": "approve"|"reject"}`
+- **approve**: creates an issue in `TRIAGE_REPO` with labels `triage`, `bug`/`feature`, `from-feedback`
+  (created if missing), the same title, and a body that starts with
+  `**From Feedback app** · sent by <anonymous|@login> · approved by @reviewer`, then the original text,
+  screenshots and the **same** receipt marker. Then it comments on the inbox issue with the link
+  (plus a hidden `<!-- feedback-twin: repo#N -->`), adds `approved`, removes `needs-review` and closes it
+  as completed. → `{"ok": true, "already": false, "result": "approved", "issue": N, "twin": {"repo", "number", "url"}}`
+- **reject**: adds `rejected`, removes `needs-review`, closes it as not planned. → `{"ok": true, "already": false, "result": "rejected", "issue": N}`
+- Idempotent: an item that was already handled returns its existing result with `"already": true`
+  (and the twin for approved items); a retried approve after a partial failure reuses the twin.
+
+`/v1/status` prefers the non-inbox issue when a receipt matches more than one, so approved reports show
+their real stage; an approved inbox issue whose twin isn't searchable yet reads as `received`.
+
 ### Abuse limits
-- Rate limits per IP, inside each isolate: 5 reports per 10 minutes and 60 status checks per minute. Over the limit returns `429 rate_limited`.
+- Rate limits per IP, inside each isolate: 5 reports per 10 minutes and 60 status checks per minute, 60 pending/review calls per minute. Over the limit returns `429 rate_limited`.
 - Request bodies are capped at 10 MB.
 - Control characters and bidi characters are stripped from all text.
 
@@ -136,6 +162,10 @@ How the relay authenticates:
 4. Point the Feedback app at the relay URL.
 
 ## Reviewing the inbox
+
+The easy way: the WizardOS Tracker's **Pending approval** stage lists these items for org members
+with **Approve** (sends a copy to `wizard-os` with `triage` + `from-feedback`) and **Reject** (Not
+planned), using `/v1/pending` and `/v1/review` above. By hand on GitHub:
 
 A reviewer must be an org member with access to `wizardos-feedback-inbox`. For each open
 `needs-review` issue:

@@ -20,6 +20,12 @@ const MEDIA_REPO = 'wizard-issue-media';
 const IMAGE_TYPES = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/jpg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' };
 const RECEIPT_RE = /^[0-9a-f]{32}$/;
 const MARKER_RE = /<!-- feedback-receipt: ([0-9a-f]{32}) -->/;
+const TWIN_RE = /<!-- feedback-twin: ([A-Za-z0-9_.-]+)#(\d+) -->/;
+const FROM_FEEDBACK_LABEL = { name: 'from-feedback', color: '8e44ad', description: 'Sent from the Feedback app' };
+const REVIEW_LABELS = {
+  approved: { name: 'approved', color: '0e8a16', description: 'Approved by a reviewer' },
+  rejected: { name: 'rejected', color: 'b60205', description: 'Rejected by a reviewer' },
+};
 
 // ---------------------------------------------------------------- status mapping
 
@@ -111,6 +117,61 @@ export function parseReceipts(raw) {
 export function receiptFromBody(body) {
   const m = String(body || '').match(MARKER_RE);
   return m ? m[1] : null;
+}
+
+/** Parse a relay-filed inbox issue body -> {text, screenshots, submitter, meta, kind}. */
+export function parseInboxBody(body) {
+  const b = String(body || '').replace(/\r\n?/g, '\n');
+  const cut = b.lastIndexOf('\n---\n');
+  const main = cut >= 0 ? b.slice(0, cut) : b;
+  const footer = cut >= 0 ? b.slice(cut + 5) : '';
+  const shotAt = main.lastIndexOf('\n\n**Screenshots**\n');
+  const text = (shotAt >= 0 ? main.slice(0, shotAt) : main).trim();
+  const shotPart = shotAt >= 0 ? main.slice(shotAt) : '';
+  const screenshots = [...shotPart.matchAll(/!\[Screenshot \d+\]\((https:\/\/[^)\s]+)\)/g)].map((m) => m[1]);
+  const failedM = shotPart.match(/_\d+ screenshots? could not be attached\._/);
+  let submitter = 'anonymous';
+  const sm = footer.match(/Submitter: @([A-Za-z0-9-]{1,39})\b/) || footer.match(/Filed with Feedback by @([A-Za-z0-9-]{1,39})\b/);
+  if (sm) submitter = '@' + sm[1];
+  const metaLine = footer.split('\n').map((l) => l.trim()).find((l) => /^(Wizard version|Device):/.test(l)) || '';
+  const km = b.match(/<!-- feedback-kind: (bug|feature) -->/);
+  return { text, screenshots, failedNote: failedM ? failedM[0] : '', submitter, meta: metaLine, kind: km ? km[1] : null };
+}
+
+/** Body for the wizard-os twin of an approved inbox issue. Keeps the SAME receipt marker. */
+export function buildTwinBody({ parsed, receipt, kind, reviewer, inboxNumber }) {
+  const parts = [`**From Feedback app** · sent by ${parsed.submitter} · approved by @${reviewer}`, '', parsed.text];
+  if (parsed.screenshots.length || parsed.failedNote) {
+    parts.push('', '**Screenshots**', '');
+    parsed.screenshots.forEach((u, i) => parts.push(`![Screenshot ${i + 1}](${u})`));
+    if (parsed.failedNote) parts.push(parsed.failedNote);
+  }
+  parts.push('', '---');
+  if (parsed.meta) parts.push(parsed.meta, '');
+  parts.push(`Filed with Feedback via relay; reviewed from the Feedback inbox (item ${inboxNumber}).`, '');
+  if (receipt) parts.push(`<!-- feedback-receipt: ${receipt} -->`);
+  if (kind) parts.push(`<!-- feedback-kind: ${kind} -->`);
+  parts.push(`<!-- feedback-inbox: ${inboxNumber} -->`);
+  return parts.join('\n');
+}
+
+function kindOf(issue) {
+  const km = String(issue.body || '').match(/<!-- feedback-kind: (bug|feature) -->/);
+  const names = (issue.labels || []).map((l) => String(typeof l === 'string' ? l : l.name).toLowerCase());
+  return km ? km[1] : names.includes('feature') ? 'feature' : names.includes('bug') ? 'bug' : null;
+}
+
+function labelNames(issue) {
+  return (issue.labels || []).map((l) => String(typeof l === 'string' ? l : l.name).toLowerCase());
+}
+
+/** Bearer token from the Authorization header, else a fallback (query/body). */
+export function userTokenFrom(request, fallback = '') {
+  const h = request.headers.get('authorization') || '';
+  const m = h.match(/^(?:Bearer|token)\s+(\S+)$/i);
+  const t = m ? m[1] : String(fallback || '');
+  if (!t || t.length > 512 || /\s/.test(t)) return '';
+  return t;
 }
 
 // ---------------------------------------------------------------- validation
@@ -278,7 +339,7 @@ export function makeLimiter() {
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
   'Access-Control-Max-Age': '86400',
 };
 
@@ -405,7 +466,12 @@ export function createApp({ fetchImpl = (...a) => fetch(...a), now = () => Date.
         for (const it of s.data?.items || []) {
           const rc = receiptFromBody(it.body);
           if (!rc || !batch.includes(rc)) continue;
-          if (found[rc] && Date.parse(found[rc].updated_at) >= Date.parse(it.updated_at)) continue;
+          const prev = found[rc];
+          if (prev) {
+            const prevInbox = isInboxIssue(cfg, prev), curInbox = isInboxIssue(cfg, it);
+            if (!prevInbox && curInbox) continue; // the real (non-inbox) issue wins
+            if (prevInbox === curInbox && Date.parse(prev.updated_at) >= Date.parse(it.updated_at)) continue;
+          }
           found[rc] = it;
         }
         for (const rc of batch) {
@@ -413,10 +479,10 @@ export function createApp({ fetchImpl = (...a) => fetch(...a), now = () => Date.
           let value;
           if (!it) value = { status_key: 'not_found', line: STATUS_LINES.not_found, title: null, kind: null, updated: null, done_at: null };
           else {
-            const st = statusFor(it);
-            const km = String(it.body || '').match(/<!-- feedback-kind: (bug|feature) -->/);
-            const names = (it.labels || []).map((l) => l.name);
-            const kind = km ? km[1] : names.includes('feature') ? 'feature' : names.includes('bug') ? 'bug' : null;
+            let st = statusFor(it);
+            // Approved in the inbox but its wizard-os twin is not searchable yet: it's been received.
+            if (isInboxIssue(cfg, it) && it.state === 'closed' && labelNames(it).includes('approved')) st = { status_key: 'received', line: STATUS_LINES.received };
+            const kind = kindOf(it);
             value = { ...st, title: String(it.title || ''), kind, updated: it.updated_at || null, done_at: st.status_key === 'done' || st.status_key === 'not_planned' ? it.closed_at || null : null };
           }
           if (value.status_key !== 'not_found') statusCache.set(rc, { at: now(), value });
@@ -426,6 +492,149 @@ export function createApp({ fetchImpl = (...a) => fetch(...a), now = () => Date.
       if (statusCache.size > 5000) statusCache.clear();
     }
     return json({ results });
+  }
+
+  function isInboxIssue(cfg, it) {
+    const ru = String(it.repository_url || '');
+    if (ru) return ru.toLowerCase().endsWith(`/repos/${cfg.org}/${cfg.inbox}`.toLowerCase());
+    return String(it.repo || '') === cfg.inbox;
+  }
+
+  /** Verify the caller is an active org member. Returns the login or throws 401/403. */
+  async function reviewer(cfg, userToken, instToken) {
+    if (!userToken) throw clientError(401, 'unauthorized', 'Sign in with GitHub first');
+    const u = await gh('/user', { token: userToken });
+    if (u.status === 401) throw clientError(401, 'unauthorized', 'GitHub sign-in is not valid');
+    const login = u.status === 200 && typeof u.data?.login === 'string' && /^[A-Za-z0-9-]{1,39}$/.test(u.data.login) ? u.data.login : '';
+    if (!login) throw clientError(403, 'forbidden', 'Only WizardOS team members can review feedback');
+    const mem = await gh(`/orgs/${cfg.org}/members/${encodeURIComponent(login)}`, { token: instToken });
+    if (mem.status !== 204) throw clientError(403, 'forbidden', 'Only WizardOS team members can review feedback');
+    return login;
+  }
+
+  function pendingItem(it) {
+    const parsed = parseInboxBody(it.body);
+    return {
+      number: it.number,
+      kind: parsed.kind || kindOf(it),
+      title: String(it.title || ''),
+      text: parsed.text.replace(/\u200b/g, ''),
+      submitter: parsed.submitter,
+      created: it.created_at || null,
+      screenshots: parsed.screenshots,
+    };
+  }
+
+  async function handlePending(request, url, env) {
+    const cfg = config(env);
+    const userToken = userTokenFrom(request, url.searchParams.get('gh_token'));
+    if (!userToken) throw clientError(401, 'unauthorized', 'Sign in with GitHub first');
+    const token = await installationToken(cfg);
+    await reviewer(cfg, userToken, token);
+    const items = [];
+    for (let page = 1; page <= 5; page++) {
+      const r = await gh(`/repos/${cfg.org}/${cfg.inbox}/issues?state=open&labels=needs-review&per_page=100&sort=created&direction=asc&page=${page}`, { token });
+      if (r.status !== 200 || !Array.isArray(r.data)) throw clientError(502, 'upstream', 'Could not load the inbox right now');
+      for (const it of r.data) if (!it.pull_request) items.push(pendingItem(it));
+      if (r.data.length < 100) break;
+    }
+    return json({ items });
+  }
+
+  async function ensureLabel(cfg, token, repo, spec) {
+    const g = await gh(`/repos/${cfg.org}/${repo}/labels/${encodeURIComponent(spec.name)}`, { token });
+    if (g.status === 200) return;
+    const c = await gh(`/repos/${cfg.org}/${repo}/labels`, { method: 'POST', token, body: spec });
+    if (c.status !== 201 && c.status !== 422) throw clientError(502, 'upstream', 'Could not prepare labels');
+  }
+
+  async function findTwin(cfg, token, inboxNumber, receipt) {
+    // 1) our own hand-over comment on the inbox issue (always present once approved)
+    const cm = await gh(`/repos/${cfg.org}/${cfg.inbox}/issues/${inboxNumber}/comments?per_page=100`, { token });
+    if (cm.status === 200 && Array.isArray(cm.data)) {
+      for (const c of cm.data) {
+        const m = String(c.body || '').match(TWIN_RE);
+        if (m) return { repo: m[1], number: Number(m[2]) };
+      }
+    }
+    // 2) a twin created but not yet linked (partial failure): search by receipt
+    if (receipt) {
+      const q = `repo:${cfg.org}/${cfg.triage} is:issue in:body "feedback-receipt: ${receipt}"`;
+      const s = await gh(`/search/issues?per_page=10&q=${encodeURIComponent(q)}`, { token });
+      if (s.status === 200) {
+        const hit = (s.data?.items || []).find((x) => receiptFromBody(x.body) === receipt && !isInboxIssue(cfg, x));
+        if (hit) return { repo: cfg.triage, number: hit.number };
+      }
+    }
+    return null;
+  }
+
+  async function finishInbox(cfg, token, number, { reason, add, comment }) {
+    if (comment) {
+      const c = await gh(`/repos/${cfg.org}/${cfg.inbox}/issues/${number}/comments`, { method: 'POST', token, body: { body: comment } });
+      if (c.status !== 201) throw clientError(502, 'upstream', 'Could not update the inbox item');
+    }
+    await ensureLabel(cfg, token, cfg.inbox, REVIEW_LABELS[add]);
+    await gh(`/repos/${cfg.org}/${cfg.inbox}/issues/${number}/labels`, { method: 'POST', token, body: { labels: [add] } });
+    await gh(`/repos/${cfg.org}/${cfg.inbox}/issues/${number}/labels/needs-review`, { method: 'DELETE', token });
+    const p = await gh(`/repos/${cfg.org}/${cfg.inbox}/issues/${number}`, { method: 'PATCH', token, body: { state: 'closed', state_reason: reason } });
+    if (p.status !== 200) throw clientError(502, 'upstream', 'Could not close the inbox item');
+  }
+
+  async function handleReview(request, env) {
+    const cl = Number(request.headers.get('content-length') || 0);
+    if (cl > 64 * 1024) throw clientError(413, 'too_large', 'Request is too large');
+    let input;
+    try { input = JSON.parse(await request.text()); } catch { throw clientError(400, 'bad_json', 'Body must be JSON'); }
+    if (!input || typeof input !== 'object' || Array.isArray(input)) throw clientError(400, 'bad_request', 'Body must be a JSON object');
+    const cfg = config(env);
+    const userToken = userTokenFrom(request, typeof input.gh_token === 'string' ? input.gh_token : '');
+    if (!userToken) throw clientError(401, 'unauthorized', 'Sign in with GitHub first');
+    const action = input.action;
+    if (action !== 'approve' && action !== 'reject') throw clientError(400, 'bad_action', "action must be 'approve' or 'reject'");
+    const number = Number(input.issue);
+    if (!Number.isInteger(number) || number < 1) throw clientError(400, 'bad_issue', 'issue must be an inbox issue number');
+    const token = await installationToken(cfg);
+    const login = await reviewer(cfg, userToken, token);
+    const g = await gh(`/repos/${cfg.org}/${cfg.inbox}/issues/${number}`, { token });
+    if (g.status !== 200 || !g.data || g.data.pull_request) throw clientError(404, 'not_found', 'No such inbox item');
+    const it = g.data;
+    const labels = labelNames(it);
+    const receipt = receiptFromBody(it.body);
+    const kind = parseInboxBody(it.body).kind || kindOf(it);
+
+    // Already handled? Return what happened (idempotent).
+    const twinUrl = (t) => `https://github.com/${cfg.org}/${t.repo}/issues/${t.number}`;
+    if (labels.includes('approved')) {
+      const t = await findTwin(cfg, token, number, receipt);
+      return json({ ok: true, already: true, result: 'approved', issue: number, ...(t ? { twin: { repo: t.repo, number: t.number, url: twinUrl(t) } } : {}) });
+    }
+    if (labels.includes('rejected') || (it.state === 'closed' && !labels.includes('approved'))) {
+      return json({ ok: true, already: true, result: 'rejected', issue: number });
+    }
+
+    if (action === 'reject') {
+      await finishInbox(cfg, token, number, { reason: 'not_planned', add: 'rejected', comment: `Not planned — rejected by @${login}.` });
+      statusCache.delete(receipt);
+      return json({ ok: true, already: false, result: 'rejected', issue: number });
+    }
+
+    // approve: create (or find) the twin, then close the inbox item.
+    let twin = await findTwin(cfg, token, number, receipt);
+    if (!twin) {
+      await ensureLabel(cfg, token, cfg.triage, FROM_FEEDBACK_LABEL);
+      const parsed = parseInboxBody(it.body);
+      const body = buildTwinBody({ parsed, receipt, kind, reviewer: login, inboxNumber: number });
+      const tl = ['triage', FROM_FEEDBACK_LABEL.name];
+      if (kind) tl.splice(1, 0, kind);
+      const c = await gh(`/repos/${cfg.org}/${cfg.triage}/issues`, { method: 'POST', token, body: { title: String(it.title || 'Feedback'), body, labels: tl } });
+      if (c.status !== 201 || !c.data?.number) throw clientError(502, 'upstream', 'Could not send it to the builder queue right now');
+      twin = { repo: cfg.triage, number: c.data.number };
+    }
+    const link = `${cfg.org}/${twin.repo}#${twin.number}`;
+    await finishInbox(cfg, token, number, { reason: 'completed', add: 'approved', comment: `Approved by @${login} — sent to ${link}.\n\n<!-- feedback-twin: ${twin.repo}#${twin.number} -->` });
+    statusCache.delete(receipt);
+    return json({ ok: true, already: false, result: 'approved', issue: number, twin: { repo: twin.repo, number: twin.number, url: twinUrl(twin) } });
   }
 
   return async function fetchHandler(request, env = {}) {
@@ -445,6 +654,16 @@ export function createApp({ fetchImpl = (...a) => fetch(...a), now = () => Date.
         if (request.method !== 'GET') return errorResponse(405, 'method_not_allowed', 'Use GET');
         if (!allow('status', ip, 60, 60 * 1000, now())) return errorResponse(429, 'rate_limited', 'Too many status checks, please slow down');
         return await handleStatus(url, env);
+      }
+      if (url.pathname === '/v1/pending') {
+        if (request.method !== 'GET') return errorResponse(405, 'method_not_allowed', 'Use GET');
+        if (!allow('pending', ip, 60, 60 * 1000, now())) return errorResponse(429, 'rate_limited', 'Too many requests, please slow down');
+        return await handlePending(request, url, env);
+      }
+      if (url.pathname === '/v1/review') {
+        if (request.method !== 'POST') return errorResponse(405, 'method_not_allowed', 'Use POST');
+        if (!allow('review', ip, 60, 60 * 1000, now())) return errorResponse(429, 'rate_limited', 'Too many requests, please slow down');
+        return await handleReview(request, env);
       }
       return errorResponse(404, 'not_found', 'Unknown path');
     } catch (e) {
