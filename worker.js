@@ -261,6 +261,88 @@ export function validateReport(input) {
   return { kind, text, wizard_version, device, gh_token, screenshots };
 }
 
+// ---------------------------------------------------------------- Try new features counts (wizard-app-manager#701)
+
+export const SWITCH_FEEDBACK_CONTRACT = 'wizard.switch-feedback/1';
+export const SWITCH_COUNTS_CONTRACT = 'wizard.switch-counts/1';
+export const SWITCH_FEEDBACK_PATH = 'switch-feedback/boxes.json';
+const SF_MAX_BODY = 64 * 1024;
+const SF_MAX_ROWS = 200;
+const SF_MAX_ISSUES = 12;
+const SF_MAX_BOXES = 3000;
+const SF_KEEP_MS = 90 * 24 * 3600 * 1000; // a box not heard from for 90 days stops counting
+const SF_REFRESH_MS = 20 * 3600 * 1000; // same rows again: only re-stamp it after this long (one write a day per box)
+const SF_BOX_RE = /^[0-9a-f]{32}$/;
+const SF_ID_RE = /^[a-z0-9][a-z0-9._-]{0,63}:[A-Za-z0-9][A-Za-z0-9._\/-]{0,79}$/;
+const SF_ISSUE_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}#\d{1,7}$/;
+
+/** Validates a POST /v1/switch-feedback body: {contract, box, switches: [{id, issues, tried, vote}]}. Anything else is dropped. */
+export function validateSwitchFeedback(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw clientError(400, 'bad_request', 'Body must be a JSON object');
+  if (input.contract !== SWITCH_FEEDBACK_CONTRACT) throw clientError(400, 'bad_contract', `contract must be '${SWITCH_FEEDBACK_CONTRACT}'`);
+  if (typeof input.box !== 'string' || !SF_BOX_RE.test(input.box)) throw clientError(400, 'bad_box', 'box must be 32 lowercase hex characters');
+  if (!Array.isArray(input.switches)) throw clientError(400, 'bad_switches', 'switches must be a list');
+  if (input.switches.length > SF_MAX_ROWS) throw clientError(400, 'too_many_switches', `At most ${SF_MAX_ROWS} switches`);
+  const seen = new Set();
+  const switches = [];
+  for (const r of input.switches) {
+    if (!r || typeof r !== 'object' || Array.isArray(r)) throw clientError(400, 'bad_switches', 'Each switch must be an object');
+    if (typeof r.id !== 'string' || !SF_ID_RE.test(r.id)) throw clientError(400, 'bad_switch_id', "Each switch id is '<app id>:<switch id>'");
+    if (r.tried !== undefined && typeof r.tried !== 'boolean') throw clientError(400, 'bad_tried', 'tried must be true or false');
+    const vote = r.vote === undefined ? null : r.vote;
+    if (vote !== null && vote !== 'up' && vote !== 'down') throw clientError(400, 'bad_vote', "vote must be 'up', 'down' or null");
+    const issues = r.issues === undefined || r.issues === null ? [] : r.issues;
+    if (!Array.isArray(issues) || issues.length > SF_MAX_ISSUES || issues.some((i) => typeof i !== 'string' || !SF_ISSUE_RE.test(i))) throw clientError(400, 'bad_issues', "issues must be a list of 'owner/repo#N'");
+    if (seen.has(r.id)) continue;
+    seen.add(r.id);
+    switches.push({ id: r.id, issues: [...new Set(issues)], tried: r.tried === true, vote });
+  }
+  switches.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return { box: input.box, switches };
+}
+
+/** Pure: put one box's latest rows into the stored file. Returns {store, changed}. Stale boxes drop out; oldest go past the cap. */
+export function mergeSwitchFeedback(store, box, switches, nowMs) {
+  const boxes = {};
+  const old = store && typeof store.boxes === 'object' && store.boxes ? store.boxes : {};
+  for (const [b, v] of Object.entries(old)) {
+    const at = Date.parse(v?.at || '');
+    if (SF_BOX_RE.test(b) && Array.isArray(v?.switches) && Number.isFinite(at) && nowMs - at < SF_KEEP_MS) boxes[b] = v;
+  }
+  const prev = boxes[box];
+  const same = prev && JSON.stringify(prev.switches) === JSON.stringify(switches);
+  const fresh = prev && nowMs - Date.parse(prev.at) < SF_REFRESH_MS;
+  const dropped = Object.keys(old).length !== Object.keys(boxes).length;
+  if (!dropped && ((same && fresh) || (!prev && !switches.length))) return { store, changed: false };
+  delete boxes[box];
+  if (switches.length) boxes[box] = { at: new Date(nowMs).toISOString(), switches };
+  const keys = Object.keys(boxes);
+  if (keys.length > SF_MAX_BOXES) {
+    keys.sort((a, b) => Date.parse(boxes[a].at) - Date.parse(boxes[b].at));
+    for (const k of keys.slice(0, keys.length - SF_MAX_BOXES)) delete boxes[k];
+  }
+  return { store: { contract: SWITCH_FEEDBACK_CONTRACT, boxes }, changed: true };
+}
+
+/** Pure: stored boxes -> {"<app>:<switch>": {tried, up, down, issues}} (one count per box). */
+export function switchCounts(store, nowMs) {
+  const counts = {};
+  let boxes = 0;
+  for (const v of Object.values(store?.boxes || {})) {
+    const at = Date.parse(v?.at || '');
+    if (!Array.isArray(v?.switches) || !Number.isFinite(at) || nowMs - at >= SF_KEEP_MS) continue;
+    boxes++;
+    for (const r of v.switches) {
+      const c = counts[r.id] || (counts[r.id] = { tried: 0, up: 0, down: 0, issues: [] });
+      if (r.tried) c.tried++;
+      if (r.vote === 'up') c.up++;
+      if (r.vote === 'down') c.down++;
+      for (const i of r.issues || []) if (!c.issues.includes(i)) c.issues.push(i);
+    }
+  }
+  return { contract: SWITCH_COUNTS_CONTRACT, boxes, counts };
+}
+
 // ---------------------------------------------------------------- issue body
 
 export function buildIssueBody({ report, receipt, trusted, login, shots = [], failedShots = 0 }) {
@@ -693,6 +775,48 @@ export function createApp({ fetchImpl = (...a) => fetch(...a), now = () => Date.
     return json({ ok: true, already: false, result: 'approved', issue: number, kind, ...(changed ? { changed_from: submittedKind } : {}), twin: { repo: twin.repo, number: twin.number, url: twinUrl(twin) } });
   }
 
+  async function readSwitchStore(cfg, token) {
+    const r = await gh(`/repos/${cfg.org}/${MEDIA_REPO}/contents/${SWITCH_FEEDBACK_PATH}`, { token });
+    if (r.status === 404) return { store: { contract: SWITCH_FEEDBACK_CONTRACT, boxes: {} }, sha: null };
+    if (r.status !== 200 || typeof r.data?.content !== 'string') throw clientError(502, 'upstream', 'The relay could not reach GitHub');
+    let store;
+    try { store = JSON.parse(new TextDecoder().decode(b64ToBytes(r.data.content.replace(/\s+/g, '')))); } catch { store = null; }
+    return { store: store && typeof store === 'object' ? store : { contract: SWITCH_FEEDBACK_CONTRACT, boxes: {} }, sha: r.data.sha || null };
+  }
+
+  async function handleSwitchFeedback(request, env) {
+    const cl = Number(request.headers.get('content-length') || 0);
+    if (cl > SF_MAX_BODY) throw clientError(413, 'too_large', 'Request is too large');
+    const buf = await request.arrayBuffer();
+    if (buf.byteLength > SF_MAX_BODY) throw clientError(413, 'too_large', 'Request is too large');
+    let input;
+    try { input = JSON.parse(new TextDecoder().decode(buf)); } catch { throw clientError(400, 'bad_json', 'Body must be JSON'); }
+    const fb = validateSwitchFeedback(input);
+    const cfg = config(env);
+    const token = await installationToken(cfg);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const { store, sha } = await readSwitchStore(cfg, token);
+      const { store: next, changed } = mergeSwitchFeedback(store, fb.box, fb.switches, now());
+      if (!changed) return json({ ok: true, stored: false, switches: fb.switches.length });
+      const body = { message: 'switch feedback: one box updated', content: bytesToB64(new TextEncoder().encode(JSON.stringify(next))) };
+      if (sha) body.sha = sha;
+      const w = await gh(`/repos/${cfg.org}/${MEDIA_REPO}/contents/${SWITCH_FEEDBACK_PATH}`, { method: 'PUT', token, body });
+      if (w.status === 200 || w.status === 201) return json({ ok: true, stored: true, switches: fb.switches.length });
+      if (w.status !== 409 && w.status !== 422) break; // 409/422: someone else wrote first, read again
+    }
+    throw clientError(502, 'upstream', 'The relay could not store it, please try again later');
+  }
+
+  async function handleSwitchCounts(request, url, env) {
+    const cfg = config(env);
+    const userToken = userTokenFrom(request, url.searchParams.get('gh_token'));
+    if (!userToken) throw clientError(401, 'unauthorized', 'Sign in with GitHub first');
+    const token = await installationToken(cfg);
+    await reviewer(cfg, userToken, token);
+    const { store } = await readSwitchStore(cfg, token);
+    return json(switchCounts(store, now()));
+  }
+
   return async function fetchHandler(request, env = {}) {
     const url = new URL(request.url);
     const ip = request.headers.get('cf-connecting-ip') || 'unknown';
@@ -720,6 +844,16 @@ export function createApp({ fetchImpl = (...a) => fetch(...a), now = () => Date.
         if (request.method !== 'POST') return errorResponse(405, 'method_not_allowed', 'Use POST');
         if (!allow('review', ip, 60, 60 * 1000, now())) return errorResponse(429, 'rate_limited', 'Too many requests, please slow down');
         return await handleReview(request, env);
+      }
+      if (url.pathname === '/v1/switch-feedback') {
+        if (request.method !== 'POST') return errorResponse(405, 'method_not_allowed', 'Use POST');
+        if (!allow('switch-feedback', ip, 20, 10 * 60 * 1000, now())) return errorResponse(429, 'rate_limited', 'Too many requests, please wait a few minutes');
+        return await handleSwitchFeedback(request, env);
+      }
+      if (url.pathname === '/v1/switch-counts') {
+        if (request.method !== 'GET') return errorResponse(405, 'method_not_allowed', 'Use GET');
+        if (!allow('switch-counts', ip, 60, 60 * 1000, now())) return errorResponse(429, 'rate_limited', 'Too many requests, please slow down');
+        return await handleSwitchCounts(request, url, env);
       }
       return errorResponse(404, 'not_found', 'Unknown path');
     } catch (e) {
