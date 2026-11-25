@@ -118,6 +118,24 @@ screenshot section; `submitter` is `anonymous` or `@login`; screenshot URLs poin
 `/v1/status` prefers the non-inbox issue when a receipt matches more than one, so approved reports show
 their real stage; an approved inbox issue whose twin isn't searchable yet reads as `received`.
 
+### Try new features counts: `POST /v1/switch-feedback`, `GET /v1/switch-counts`
+For the shared **Try new features** section (wizard-os `docs/APP_SWITCHES.md`, wizard-app-manager#701). A box whose owner
+turned on `wizard/try-feature-counts` sends, at most once a day or when something changed, its whole current state:
+```json
+{"contract": "wizard.switch-feedback/1", "box": "<32 hex, random, made once on the box>",
+ "switches": [{"id": "<app id>:<switch id>", "issues": ["owner/repo#N"], "tried": true, "vote": "up"}]}
+```
+- No token, no identity: only those four fields per switch are kept (anything else in the body is dropped); at most 200
+  switches, 12 issues each; `vote` is `up`, `down` or `null`. Bad bodies → `400`. 20 per IP per 10 min.
+- Stored as one file, `GH_ORG/wizard-issue-media` `switch-feedback/boxes.json` (`{boxes: {<box>: {at, switches}}}`),
+  through the same contents API the screenshots use, so the relay still needs no Cloudflare storage. Each box's send
+  replaces its previous row (never counted twice); an empty list removes it; a box not heard from for 90 days drops out;
+  at most 3000 boxes (oldest go first). The same rows again within 20 h are not written again.
+  → `200 {"ok": true, "stored": true|false, "switches": N}`
+- `GET /v1/switch-counts` (team members only, `Authorization: Bearer <GitHub token>` like `/v1/pending`) →
+  `{"contract": "wizard.switch-counts/1", "boxes": N, "counts": {"<app>:<switch>": {"tried": N, "up": N, "down": N, "issues": [...]}}}`,
+  which the Tracker shows as `Tried by N · 👍 N · 👎 N`.
+
 ### Abuse limits
 - Rate limits per IP, inside each isolate: 5 reports per 10 minutes and 60 status checks per minute, 60 pending/review calls per minute. Over the limit returns `429 rate_limited`.
 - Request bodies are capped at 10 MB.
